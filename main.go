@@ -15,6 +15,10 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
+const (
+	maxHistory = 50
+)
+
 type CalorieScaleParam struct {
 	Threshold           int
 	Keyword             string
@@ -36,24 +40,26 @@ func newCalorieScale(ctx context.Context, param *CalorieScaleParam) *calorieScal
 	twitterClient := twitter.NewClient(httpClient)
 
 	return &calorieScale{
-		ctx:           ctx,
-		threshold:     param.Threshold,
-		keyword:       param.Keyword,
-		calorie:       atomic.Value{},
-		twitterClient: twitterClient,
-		oscClient:     oscClient,
-		oscInterval:   time.Second,
+		ctx:             ctx,
+		threshold:       param.Threshold,
+		keyword:         param.Keyword,
+		calorie:         atomic.Value{},
+		twitterClient:   twitterClient,
+		oscClient:       oscClient,
+		oscInterval:     time.Second,
+		intervalHistory: make([]float64, 0),
 	}
 }
 
 type calorieScale struct {
-	ctx           context.Context
-	threshold     int
-	keyword       string
-	calorie       atomic.Value
-	twitterClient *twitter.Client
-	oscClient     *osc.Client
-	oscInterval   time.Duration
+	ctx             context.Context
+	threshold       int
+	keyword         string
+	calorie         atomic.Value
+	twitterClient   *twitter.Client
+	oscClient       *osc.Client
+	oscInterval     time.Duration
+	intervalHistory []float64
 }
 
 func (s *calorieScale) Start() {
@@ -136,12 +142,32 @@ func (s *calorieScale) calculateCalorie() {
 	}
 
 	avgInterval := sum / float64(len(result.Statuses)-1)
-	t := 1 - math.Min(1, avgInterval/float64(s.threshold))
+	t := 1 - math.Min(1, avgInterval/(s.getHistoryAverage()*2))
 	calorie := int32(easeInOutCubic(t) * 100)
+	s.addHistory(avgInterval)
 
 	log.Printf("Calculated keyword=%s tweets=%d avgInterval=%f, calorie=%d\n",
 		s.keyword, len(result.Statuses), avgInterval, calorie)
 	s.calorie.Store(calorie)
+}
+
+func (s *calorieScale) addHistory(v float64) {
+	s.intervalHistory = append(s.intervalHistory, v)
+	if len(s.intervalHistory) > maxHistory {
+		s.intervalHistory = s.intervalHistory[1:]
+	}
+}
+
+func (s *calorieScale) getHistoryAverage() float64 {
+	if len(s.intervalHistory) == 0 {
+		return float64(s.threshold)
+	}
+
+	var sum float64
+	for _, v := range s.intervalHistory {
+		sum += v
+	}
+	return sum / float64(len(s.intervalHistory))
 }
 
 func easeInOutCubic(x float64) float64 {
